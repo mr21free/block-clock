@@ -1,224 +1,123 @@
-# 🟠 Bitcoin Block Clock - Heltec Vision Master E213
+# Block Clock
 
-> **Every Bitcoiner should have a block clock. Period.**
+Block Clock is a small open-source Bitcoin desk display for Heltec Vision Master e-ink boards. It shows Bitcoin network data without needing a commercial block clock.
 
-A low-power, battery-friendly Bitcoin block clock built on the **Heltec
-Vision Master E213** (ESP32-S3 + 2.13" e-ink display).
+The firmware supports:
 
-It connects to your local network via Wi-Fi, pulls Bitcoin data over
-MQTT (typically from your own Bitcoin node or Home Assistant), and
-displays the most important Bitcoin signals in a calm, always-on way.
+- Heltec Vision Master E213
+- Heltec Vision Master E290
 
-------------------------------------------------------------------------
+The same source code is used for both boards. Select the matching board in Arduino IDE before compiling.
 
-## ✨ Why this exists
+Read the site page at [freedomclock.io/diy-block-clock/](https://freedomclock.io/diy-block-clock/).
 
-Bitcoin is not just a price chart.
+## What it shows
 
-It is block height.\
-It is deterministic issuance.\
-It is halving cycles.\
-It is time.
+- Block height
+- Blocks remaining to the next halving
+- BTC price in USD
+- Network hashrate in EH/s
+- Battery icon, with optional percent
+- Last update time
 
-A block clock makes Bitcoin tangible:
+The display refreshes on the configured interval, then the ESP32 goes back to deep sleep.
 
--   It shows that Bitcoin keeps moving forward, block by block
--   It grounds you in protocol time, not exchange noise
--   It reminds you that halvings are scheduled - not narratives
+## Data sources
 
-You glance at it.\
-No apps. No exchanges. No distractions.
+Block Clock has two data modes.
 
-------------------------------------------------------------------------
+MQTT mode is for people who already publish Bitcoin data on their local network, usually from a Bitcoin node or Home Assistant. Use retained MQTT messages so the clock can wake, read the latest values, refresh the display, and sleep again.
 
-## 🚀 What makes this different
+Online mode fetches public data directly:
 
-Unlike many commercial block clocks, this one is:
+- block height from mempool.space
+- BTC price from mempool.space, with CoinGecko as fallback
+- network hashrate from mempool.space
+- halving countdown calculated locally from block height
 
--   **Small** - fits anywhere
--   **Cheap** - off-the-shelf hardware
--   **Customisable** - you control the data and update frequency
--   **Battery powered** - ≈ one week on a 500 mAh LiPo (hourly updates)
--   **Open & hackable** - not a closed ecosystem
+MQTT is still the better privacy setup. Online mode is simpler.
 
-------------------------------------------------------------------------
+## Hardware
 
-## 📊 What it can display
+- Heltec Vision Master E213, 2.13 inch e-ink display
+- or Heltec Vision Master E290, 2.90 inch e-ink display
+- 3.7 V LiPo battery with the right connector
+- USB-C cable
 
-Depending on your configuration:
+No soldering is required for the basic build.
 
--   Block height
--   Blocks remaining to next halving
--   BTC price
--   Network hashrate
--   Battery voltage + estimated %
--   Last update timestamp (YYYY-MM-DD HH:MM)
+The E213 build has been tested around one week of runtime on a 500 mAh battery with hourly refreshes. Runtime on E290 depends on the battery, refresh interval, and Wi-Fi conditions.
 
-The display refreshes on a fixed interval (default: once per hour), then
-the ESP32 enters deep sleep to conserve power.
+## First setup
 
-------------------------------------------------------------------------
+On first boot the device shows a welcome screen:
 
-## 🧰 Hardware
-
--   **Heltec Vision Master E213**\
-    ESP32-S3 + 2.13" e-ink display (250×122)
-    👉 [Buy here](https://heltec.org/project/vision-master-e213/)
-
--   **3.7 V LiPo battery (JST connector)**\
-    Tested with 500 mAh → \~1 week runtime with hourly updates
-
-No additional hardware required.
-
-------------------------------------------------------------------------
-
-## 👤 Who is this for?
-
--   Bitcoiners who want a physical representation of Bitcoin time
--   People running their own Bitcoin node
--   Builders who prefer open systems
--   Anyone who finds commercial block clocks:
-    -   too expensive
-    -   too large
-    -   too closed / not customisable
-
-You decide:
-
--   What data is shown
--   How often it updates
--   Whether price is included
-
-------------------------------------------------------------------------
-
-## 🧠 Learnings & Design Decisions
-
-### 1️⃣ Real-time updates are not worth it on battery
-
-Frequent updates (e.g. every 10 minutes) drain the battery quickly while
-adding little real value.
-
-Bitcoin does not change meaningfully at minute-by-minute human scale.
-
-Updating once per hour gives:
-
--   Excellent battery life
--   A device that still feels alive
--   Alignment with Bitcoin's slow, steady nature
-
-With a 500 mAh battery, runtime is roughly one week.
-
-------------------------------------------------------------------------
-
-### 2️⃣ Price still matters
-
-Block height and halving progress are fundamental.
-
-But whether someone has been in Bitcoin for 1 year or 13 years -
-people still care about price.
-
-Including BTC price keeps the device relevant as a daily reference
-point.
-
-------------------------------------------------------------------------
-
-### 3️⃣ Raw aesthetics are intentional
-
--   No enclosure (yet)
--   No animations
--   No glossy UI
-
-Function first. Polish later.
-
-------------------------------------------------------------------------
-
-## 🏗 Software Architecture
-
--   ESP32 connects to Wi-Fi
--   Subscribes to MQTT topics on your local network
--   Data typically published from Bitcoin Core via Python or Home
-    Assistant
--   Display updates on fixed interval → deep sleep
-
-### Default MQTT topics
-
-    home/bitcoin/height
-    home/bitcoin/halving/blocks_remaining
-    home/bitcoin/price_usd
-    home/bitcoin/hashrate_ehs
-
-Use retained MQTT messages so the device always receives the latest
-values after waking.
-
-------------------------------------------------------------------------
-
-## 🔐 Configuration & Secrets
-
-Wi-Fi and MQTT credentials are **not committed** to the repository.
-
-Create a local file:
-
-    secrets.h
-
-Example template:
-
-``` cpp
-static const char* WIFI_SSID     = "YOUR_WIFI_NAME";
-static const char* WIFI_PASS     = "YOUR_WIFI_PASSWORD";
-
-static const char* MQTT_SERVER   = "192.168.1.144";
-static const int   MQTT_PORT     = 1883;
-static const char* MQTT_USER     = "mqtt";
-static const char* MQTT_PASS     = "mqtt";
+```text
+BLOCK CLOCK
 ```
 
-`secrets.h` is ignored via `.gitignore`.
+It then starts a setup Wi-Fi network and shows a QR code on the e-ink display. Scan the QR code, join the setup network, and open:
 
-`secrets.example.h` file in provided in the repository.
-
-------------------------------------------------------------------------
-
-## 🔋 Update Interval
-
-Battery life is directly controlled by the update interval.
-
-In the main sketch:
-
-``` cpp
-static const uint32_t UPDATE_INTERVAL_MINUTES = 60;
+```text
+http://192.168.4.1
 ```
 
-Examples:
+The setup page lets you configure:
 
--   `10` → frequent updates, short battery life
--   `30` → compromise
--   `60` → recommended (\~1 week on 500 mAh)
+- Wi-Fi
+- data source, MQTT or online
+- refresh interval
+- battery percent display
+- MQTT server, credentials, and topics
 
-------------------------------------------------------------------------
+There is no setup PIN. The block clock does not store personal financial data.
 
-## 📸 Photos
+## Default MQTT topics
 
-![Showcase view](photos/blockclock_showcase.jpg)\
-\
-![Front view](photos/blockclock_front.jpg)\
-\
-![Back view](photos/blockclock_back.jpg)
+```text
+home/bitcoin/height
+home/bitcoin/halving/blocks_remaining
+home/bitcoin/hashrate_ehs
+home/bitcoin/price/usd
+```
 
-------------------------------------------------------------------------
+## Build and flash
 
-## 🔮 Future Ideas
+1. Install Arduino IDE.
+2. Install these libraries:
+   - heltec-eink-modules by Todd Herbert
+   - Heltec ESP32 Dev-Boards
+   - PubSubClient by Nick O'Leary
+   - ArduinoJson by Benoit Blanchon
+3. Open `Block_Clock.ino`.
+4. Connect the board with USB-C.
+5. Select the matching board:
+   - `Heltec Vision Master E213`
+   - `Heltec Vision Master E290`
+6. Upload the sketch.
 
--   Simple enclosure / 3D printed case
--   Partial e-ink refresh optimisation
--   Solar trickle charging
--   More Bitcoin-native metrics
--   Multi-screen rotation mode
+Each board needs firmware compiled for that board profile.
 
-------------------------------------------------------------------------
+## Optional secrets bootstrap
 
-## 📜 License
+Normal setup happens through the browser page. If you want local defaults for development, copy `secrets.example.h` to `secrets.h` and edit it.
+
+`secrets.h` is ignored by git.
+
+## Code structure
+
+- `Block_Clock.ino`: Arduino entrypoint
+- `src/config.h`: board profile, defaults, constants, and config structs
+- `src/config_runtime.h`: saved config, battery reading, device ID, and helpers
+- `src/setup_portal.h`: QR setup screen and browser setup page
+- `src/block_data.h`: MQTT and online data loading
+- `src/display_screens.h`: welcome, setup, battery icon, and main dashboard drawing
+
+## TODO
+
+- TODO(miro): replace the temporary block mark with a dedicated Block Clock logo. Do not reuse the Freedom Clock logo.
+- Add enclosure files when the physical design is ready.
+
+## License
 
 MIT
-
-------------------------------------------------------------------------
-
-🟠 If you build one, fork it, improve it, and make it yours.

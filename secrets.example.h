@@ -1,9 +1,12 @@
 #pragma once
 
-static const char* WIFI_SSID     = "YOUR_WIFI_NAME";
-static const char* WIFI_PASS     = "YOUR_WIFI_PASSWORD";
+// Optional local bootstrap. Normal setup happens through the device setup page.
+#define USE_SECRETS_BOOTSTRAP 1
 
-static const char* MQTT_SERVER   = "192.168.1.144";
-static const int   MQTT_PORT     = 1883;
-static const char* MQTT_USER     = "mqtt";
-static const char* MQTT_PASS     = "mqtt";
+#define BLOCKCLOCK_WIFI_SSID "YOUR_WIFI_NAME"
+#define BLOCKCLOCK_WIFI_PASS "YOUR_WIFI_PASSWORD"
+
+#define BLOCKCLOCK_MQTT_SERVER "192.168.1.144"
+#define BLOCKCLOCK_MQTT_PORT 1883
+#define BLOCKCLOCK_MQTT_USER "mqtt"
+#define BLOCKCLOCK_MQTT_PASS "mqtt"

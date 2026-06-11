@@ -1,0 +1,194 @@
+#pragma once
+
+static bool gotHeight = false;
+static bool gotHalving = false;
+static bool gotHashrate = false;
+static bool gotPrice = false;
+static BlockData* mqttTargetData = nullptr;
+
+static bool connectWiFi(const DeviceConfig& cfg, uint16_t timeoutMs, bool keepPortalAp) {
+  if (!hasText(cfg.wifiSsid)) return false;
+
+  WiFi.persistent(false);
+  WiFi.setSleep(false);
+  WiFi.mode(keepPortalAp ? WIFI_AP_STA : WIFI_STA);
+  WiFi.disconnect(false, false);
+  delay(150);
+  WiFi.begin(cfg.wifiSsid, cfg.wifiPass);
+
+  const uint32_t start = millis();
+  while (WiFi.status() != WL_CONNECTED && (millis() - start) < timeoutMs) {
+    delay(WIFI_POLL_DELAY_MS);
+  }
+  return WiFi.status() == WL_CONNECTED;
+}
+
+static void mqttCallback(char* topic, byte* payload, unsigned int length) {
+  if (!topic || !payload || !mqttTargetData) return;
+
+  char value[32];
+  safeCopy(value, sizeof(value), (const char*)payload, length);
+
+  if (strcmp(topic, deviceConfig.topicHeight) == 0) {
+    safeCopyCString(mqttTargetData->blockHeight, sizeof(mqttTargetData->blockHeight), value);
+    gotHeight = true;
+  } else if (strcmp(topic, deviceConfig.topicHalving) == 0) {
+    safeCopyCString(mqttTargetData->blocksToHalving, sizeof(mqttTargetData->blocksToHalving), value);
+    gotHalving = true;
+  } else if (strcmp(topic, deviceConfig.topicHashrate) == 0) {
+    safeCopyCString(mqttTargetData->hashrateEhs, sizeof(mqttTargetData->hashrateEhs), value);
+    gotHashrate = true;
+  } else if (strcmp(topic, deviceConfig.topicPriceUsd) == 0) {
+    safeCopyCString(mqttTargetData->priceUsd, sizeof(mqttTargetData->priceUsd), value);
+    gotPrice = true;
+  }
+}
+
+static bool connectMQTT(const DeviceConfig& cfg, uint16_t timeoutMs) {
+  if (!hasText(cfg.mqttServer) || cfg.mqttPort == 0) return false;
+
+  mqttClient.setServer(cfg.mqttServer, cfg.mqttPort);
+  mqttClient.setCallback(mqttCallback);
+
+  char clientId[32];
+  buildMqttClientId(clientId, sizeof(clientId));
+
+  const uint32_t start = millis();
+  while (!mqttClient.connected() && (millis() - start) < timeoutMs) {
+    bool connected;
+    if (hasText(cfg.mqttUser)) {
+      connected = mqttClient.connect(clientId, cfg.mqttUser, cfg.mqttPass);
+    } else {
+      connected = mqttClient.connect(clientId);
+    }
+    if (connected) break;
+    delay(MQTT_RETRY_DELAY_MS);
+  }
+
+  if (!mqttClient.connected()) return false;
+
+  if (hasText(cfg.topicHeight)) mqttClient.subscribe(cfg.topicHeight);
+  if (hasText(cfg.topicHalving)) mqttClient.subscribe(cfg.topicHalving);
+  if (hasText(cfg.topicHashrate)) mqttClient.subscribe(cfg.topicHashrate);
+  if (hasText(cfg.topicPriceUsd)) mqttClient.subscribe(cfg.topicPriceUsd);
+  return true;
+}
+
+static bool fetchBlockDataFromMqtt(const DeviceConfig& cfg, BlockData& outData) {
+  gotHeight = gotHalving = gotHashrate = gotPrice = false;
+  mqttTargetData = &outData;
+
+  if (!connectMQTT(cfg, MQTT_CONNECT_TIMEOUT_MS)) {
+    mqttTargetData = nullptr;
+    return false;
+  }
+
+  const uint32_t start = millis();
+  while ((millis() - start) < MQTT_WAIT_FOR_MESSAGES_MS) {
+    mqttClient.loop();
+    if (gotHeight && gotHalving && gotHashrate && gotPrice) break;
+    delay(10);
+  }
+
+  mqttTargetData = nullptr;
+  return gotHeight || gotHalving || gotHashrate || gotPrice;
+}
+
+static bool configureOnlineClient(WiFiClientSecure& client) {
+  client.setInsecure();
+  return true;
+}
+
+static bool httpGetString(const char* url, String& payload) {
+  if (WiFi.status() != WL_CONNECTED || !url || !url[0]) return false;
+
+  WiFiClientSecure secureClient;
+  configureOnlineClient(secureClient);
+
+  HTTPClient http;
+  http.setTimeout(HTTP_TIMEOUT_MS);
+  http.setConnectTimeout(HTTP_TIMEOUT_MS);
+  if (!http.begin(secureClient, url)) return false;
+
+  http.addHeader("Accept", "application/json,text/plain");
+  http.addHeader("User-Agent", "BlockClock/2026");
+  const int httpCode = http.GET();
+  if (httpCode != HTTP_CODE_OK) {
+    http.end();
+    return false;
+  }
+
+  payload = http.getString();
+  http.end();
+  payload.trim();
+  return payload.length() > 0;
+}
+
+static uint32_t blocksToNextHalving(uint32_t height) {
+  const uint32_t nextHalving = ((height / HALVING_INTERVAL_BLOCKS) + 1UL) * HALVING_INTERVAL_BLOCKS;
+  return nextHalving > height ? (nextHalving - height) : 0;
+}
+
+static bool fetchOnlineHeight(BlockData& outData) {
+  String payload;
+  if (!httpGetString(MEMPOOL_TIP_HEIGHT_URL, payload)) return false;
+  const uint32_t height = (uint32_t)payload.toInt();
+  if (height == 0) return false;
+
+  snprintf(outData.blockHeight, sizeof(outData.blockHeight), "%lu", (unsigned long)height);
+  snprintf(outData.blocksToHalving, sizeof(outData.blocksToHalving), "%lu", (unsigned long)blocksToNextHalving(height));
+  return true;
+}
+
+static bool fetchMempoolPrice(BlockData& outData) {
+  String payload;
+  if (!httpGetString(MEMPOOL_PRICE_URL, payload)) return false;
+
+  StaticJsonDocument<384> doc;
+  if (deserializeJson(doc, payload)) return false;
+  if (!doc["USD"].is<float>() && !doc["USD"].is<int>()) return false;
+  const long price = doc["USD"].as<long>();
+  if (price <= 0) return false;
+  snprintf(outData.priceUsd, sizeof(outData.priceUsd), "%ld", price);
+  return true;
+}
+
+static bool fetchCoinGeckoPrice(BlockData& outData) {
+  String payload;
+  if (!httpGetString(COINGECKO_PRICE_URL, payload)) return false;
+
+  StaticJsonDocument<256> doc;
+  if (deserializeJson(doc, payload)) return false;
+  if (!doc["bitcoin"]["usd"].is<float>() && !doc["bitcoin"]["usd"].is<int>()) return false;
+  const long price = doc["bitcoin"]["usd"].as<long>();
+  if (price <= 0) return false;
+  snprintf(outData.priceUsd, sizeof(outData.priceUsd), "%ld", price);
+  return true;
+}
+
+static bool fetchOnlineHashrate(BlockData& outData) {
+  String payload;
+  if (!httpGetString(MEMPOOL_HASHRATE_URL, payload)) return false;
+
+  StaticJsonDocument<1024> doc;
+  if (deserializeJson(doc, payload)) return false;
+  const double rawHashrate = doc["currentHashrate"].as<double>();
+  if (!(rawHashrate > 0.0)) return false;
+  const long ehs = lround(rawHashrate / 1000000000000000000.0);
+  if (ehs <= 0) return false;
+  snprintf(outData.hashrateEhs, sizeof(outData.hashrateEhs), "%ld", ehs);
+  return true;
+}
+
+static bool fetchBlockDataOnline(const DeviceConfig& cfg, BlockData& outData) {
+  (void)cfg;
+  bool ok = false;
+  ok = fetchOnlineHeight(outData) || ok;
+  ok = fetchOnlineHashrate(outData) || ok;
+  if (!fetchMempoolPrice(outData)) {
+    ok = fetchCoinGeckoPrice(outData) || ok;
+  } else {
+    ok = true;
+  }
+  return ok;
+}
