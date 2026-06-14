@@ -9,6 +9,7 @@
 #include <heltec-eink-modules.h>
 #include "esp_sleep.h"
 #include "driver/rtc_io.h"
+#include "nvs_flash.h"
 #include "qrcode.h"
 #include <cctype>
 #include <cmath>
@@ -53,10 +54,44 @@
 #define BLOCKCLOCK_MQTT_PASS DEFAULT_MQTT_PASS
 #endif
 
+#ifndef BLOCKCLOCK_DATA_SOURCE_MODE
+#define BLOCKCLOCK_DATA_SOURCE_MODE DATA_SOURCE_ONLINE
+#endif
+
+#ifndef BLOCKCLOCK_CURRENCY_CODE
+#define BLOCKCLOCK_CURRENCY_CODE DEFAULT_CURRENCY_CODE
+#endif
+
+#ifndef BLOCKCLOCK_DISPLAY_THEME_MODE
+#define BLOCKCLOCK_DISPLAY_THEME_MODE DEFAULT_DISPLAY_THEME_MODE
+#endif
+
+#ifndef BLOCKCLOCK_TOPIC_HEIGHT
+#define BLOCKCLOCK_TOPIC_HEIGHT DEFAULT_TOPIC_HEIGHT
+#endif
+
+#ifndef BLOCKCLOCK_TOPIC_HALVING
+#define BLOCKCLOCK_TOPIC_HALVING DEFAULT_TOPIC_HALVING
+#endif
+
+#ifndef BLOCKCLOCK_TOPIC_HASHRATE
+#define BLOCKCLOCK_TOPIC_HASHRATE DEFAULT_TOPIC_HASHRATE
+#endif
+
+#ifndef BLOCKCLOCK_TOPIC_PRICE_VALUE
+#define BLOCKCLOCK_TOPIC_PRICE_VALUE DEFAULT_TOPIC_PRICE_VALUE
+#endif
+
 RTC_DATA_ATTR BlockData rtcBlockData = {};
 RTC_DATA_ATTR bool rtcHasBlockData = false;
 RTC_DATA_ATTR int rtcBatteryPercent = -1;
 RTC_DATA_ATTR float rtcBatteryVoltage = 0.0f;
+RTC_DATA_ATTR time_t rtcLastKnownUnixTime = 0;
+RTC_DATA_ATTR bool batteryGaugeStateValid = false;
+RTC_DATA_ATTR int batteryGaugePercent = 0;
+RTC_DATA_ATTR float batteryGaugeReferenceVoltage = 0.0f;
+RTC_DATA_ATTR bool batteryGaugeFullHoldActive = false;
+RTC_DATA_ATTR time_t batteryGaugeFullHoldStartedUnixTime = 0;
 
 WiFiClient espClient;
 PubSubClient mqttClient(espClient);
@@ -71,10 +106,18 @@ char deviceId[DEVICE_ID_SIZE] = "";
 char portalApSsid[AP_SSID_SIZE] = "";
 char portalApPassword[AP_PASSWORD_SIZE] = "";
 bool portalShouldRestart = false;
+bool portalFactoryResetRequested = false;
+
+enum SetupBootAction : uint8_t {
+  SETUP_BOOT_ACTION_NONE = 0,
+  SETUP_BOOT_ACTION_PORTAL = 1,
+  SETUP_BOOT_ACTION_FACTORY_RESET = 2
+};
 
 #include "src/config_runtime.h"
 #include "src/display_screens.h"
 #include "src/block_data.h"
+static void factoryResetAndShowWelcome();
 #include "src/setup_portal.h"
 
 static bool setupButtonPressed() {
@@ -83,7 +126,46 @@ static bool setupButtonPressed() {
   return digitalRead(PIN_SETUP_BUTTON) == LOW;
 }
 
+static bool wasSetupButtonWake() {
+  if (esp_sleep_get_wakeup_cause() != ESP_SLEEP_WAKEUP_EXT1) return false;
+  return (esp_sleep_get_ext1_wakeup_status() & SETUP_BUTTON_WAKE_MASK) != 0;
+}
+
+static bool wasFunctionButtonWake() {
+  if (esp_sleep_get_wakeup_cause() != ESP_SLEEP_WAKEUP_EXT1) return false;
+  return (esp_sleep_get_ext1_wakeup_status() & FUNCTION_BUTTON_WAKE_MASK) != 0;
+}
+
+static bool setupWakeRequested() {
+  return wasSetupButtonWake();
+}
+
+static SetupBootAction detectSetupBootAction() {
+  pinMode(PIN_SETUP_BUTTON, INPUT_PULLUP);
+  delay(BUTTON_POLL_DELAY_MS);
+  if (digitalRead(PIN_SETUP_BUTTON) != LOW) {
+    return setupWakeRequested() ? SETUP_BOOT_ACTION_PORTAL : SETUP_BOOT_ACTION_NONE;
+  }
+
+  const uint32_t start = millis();
+  while (digitalRead(PIN_SETUP_BUTTON) == LOW) {
+    if ((millis() - start) >= FACTORY_RESET_HOLD_MS) {
+      return SETUP_BOOT_ACTION_FACTORY_RESET;
+    }
+    delay(BUTTON_POLL_DELAY_MS);
+  }
+  return SETUP_BOOT_ACTION_PORTAL;
+}
+
 static void prepareHardware() {
+  // Release buttons from RTC mode before begin(). Without this, EXT1 wake
+  // status can fail to propagate, so wasFunctionButtonWake() returns false
+  // and we lose the pending-frame fast path on button presses.
+  rtc_gpio_deinit((gpio_num_t)PIN_FUNCTION_BUTTON);
+  rtc_gpio_deinit((gpio_num_t)PIN_SETUP_BUTTON);
+  pinMode(PIN_FUNCTION_BUTTON, INPUT_PULLUP);
+  pinMode(PIN_SETUP_BUTTON, INPUT_PULLUP);
+
   pinMode(PIN_EINK_POWER, OUTPUT);
   digitalWrite(PIN_EINK_POWER, HIGH);
   delay(EINK_POWER_UP_DELAY_MS);
@@ -100,9 +182,11 @@ static void disconnectNetwork() {
 static void goToSleep(uint16_t refreshMinutes) {
   digitalWrite(PIN_EINK_POWER, LOW);
 
+  rtc_gpio_pullup_en((gpio_num_t)PIN_FUNCTION_BUTTON);
+  rtc_gpio_pulldown_dis((gpio_num_t)PIN_FUNCTION_BUTTON);
   rtc_gpio_pullup_en((gpio_num_t)PIN_SETUP_BUTTON);
   rtc_gpio_pulldown_dis((gpio_num_t)PIN_SETUP_BUTTON);
-  esp_sleep_enable_ext1_wakeup_io(SETUP_BUTTON_WAKE_MASK, ESP_EXT1_WAKEUP_ANY_LOW);
+  esp_sleep_enable_ext1_wakeup_io(BUTTON_WAKE_MASK, ESP_EXT1_WAKEUP_ANY_LOW);
 
   const uint64_t sleepUs = (uint64_t)refreshMinutes * MICROSECONDS_PER_MINUTE;
   esp_sleep_enable_timer_wakeup(sleepUs);
@@ -110,37 +194,150 @@ static void goToSleep(uint16_t refreshMinutes) {
   esp_deep_sleep_start();
 }
 
+static void goToWelcomeSleep() {
+  digitalWrite(PIN_EINK_POWER, LOW);
+
+  rtc_gpio_pullup_en((gpio_num_t)PIN_FUNCTION_BUTTON);
+  rtc_gpio_pulldown_dis((gpio_num_t)PIN_FUNCTION_BUTTON);
+  rtc_gpio_pullup_en((gpio_num_t)PIN_SETUP_BUTTON);
+  rtc_gpio_pulldown_dis((gpio_num_t)PIN_SETUP_BUTTON);
+  esp_sleep_enable_ext1_wakeup_io(BUTTON_WAKE_MASK, ESP_EXT1_WAKEUP_ANY_LOW);
+
+  Serial.flush();
+  esp_deep_sleep_start();
+}
+
+static void resetRuntimeState() {
+  rtcHasBlockData = false;
+  rtcBlockData = {};
+  rtcBatteryPercent = -1;
+  rtcBatteryVoltage = 0.0f;
+  rtcLastKnownUnixTime = 0;
+  batteryGaugeStateValid = false;
+  batteryGaugePercent = 0;
+  batteryGaugeReferenceVoltage = 0.0f;
+  batteryGaugeFullHoldActive = false;
+  batteryGaugeFullHoldStartedUnixTime = 0;
+}
+
+static void factoryResetAndShowWelcome() {
+  clearSavedDeviceConfig();
+  applyDefaultDeviceConfig(deviceConfig);
+  resetRuntimeState();
+  drawFactoryResetScreen();
+  delay(1200);
+
+  const uint32_t releaseWaitStartedMs = millis();
+  while (digitalRead(PIN_SETUP_BUTTON) == LOW && (millis() - releaseWaitStartedMs) < 5000) {
+    delay(BUTTON_POLL_DELAY_MS);
+  }
+
+  markWelcomeShown();
+  drawWelcomeScreen();
+  delay(500);
+  goToWelcomeSleep();
+}
+
 void setup() {
   Serial.begin(115200);
-  delay(500);
+  delay(30);
   Serial.println();
   Serial.println("==== Block Clock boot ====");
 
   prepareHardware();
   buildPortalCredentials();
-  loadDeviceConfig(deviceConfig);
-  applySecretsBootstrap(deviceConfig);
-
-  const bool enterSetup = !deviceConfig.configured || setupButtonPressed();
-  if (!deviceConfig.configured) {
-    drawWelcomeScreen();
-    delay(1400);
+  const SetupBootAction bootAction = detectSetupBootAction();
+  if (bootAction == SETUP_BOOT_ACTION_FACTORY_RESET) {
+    factoryResetAndShowWelcome();
+    return;
   }
 
+  loadDeviceConfig(deviceConfig);
+  applySecretsBootstrap(deviceConfig);
+  const bool postSaveRestartPending = takePostSaveRestartPending();
+
+  if (!deviceConfig.configured && !hasWelcomeBeenShown()) {
+    markWelcomeShown();
+    drawWelcomeScreen();
+    goToWelcomeSleep();
+    return;
+  }
+
+  const bool enterSetup = !deviceConfig.configured || bootAction == SETUP_BOOT_ACTION_PORTAL;
   if (enterSetup) {
     runSetupPortal();
     return;
   }
 
-  drawStatusScreen("BLOCK CLOCK", "Loading data");
+  const esp_sleep_wakeup_cause_t wakeCause = esp_sleep_get_wakeup_cause();
+  const esp_reset_reason_t resetReason = esp_reset_reason();
+  const bool manualWake = wasFunctionButtonWake();
+  // Mirror Freedom Clock: hardware-reset / power-on / brownout (wake cause undefined
+  // and reset reason not "SW restart") with a configured device is a "user is
+  // looking at the screen waiting for data" event. Without this case, HW-reset
+  // boots fall through to the no-placeholder path and the user stares at the
+  // previous image (or a blank screen on cold boot) for ~6-10 s.
+  const bool homeButtonReset = wakeCause == ESP_SLEEP_WAKEUP_UNDEFINED
+    && deviceConfig.configured
+    && bootAction == SETUP_BOOT_ACTION_NONE
+    && resetReason != ESP_RST_SW;
+  Serial.printf(
+    "[BlockClock] wake cause=%d reset=%d ext1=0x%llX manualWake=%d homeReset=%d hasCache=%d postSave=%d\n",
+    (int)wakeCause,
+    (int)resetReason,
+    (unsigned long long)esp_sleep_get_ext1_wakeup_status(),
+    (int)manualWake,
+    (int)homeButtonReset,
+    (int)rtcHasBlockData,
+    (int)postSaveRestartPending
+  );
 
   float batteryVoltage = readBatteryVoltage();
-  int batteryPercent = batteryPercentFromVoltage(batteryVoltage);
+  int batteryPercent = stabilizedBatteryPercentFromVoltage(batteryVoltage, rtcLastKnownUnixTime);
   rtcBatteryVoltage = batteryVoltage;
   rtcBatteryPercent = batteryPercent;
 
+  // Freedom Clock pattern: when this boot is a known "user is waiting for data"
+  // case — button wake with cache, or the very first boot after a portal save —
+  // draw a pending frame immediately with "---" placeholders so the user gets
+  // visible feedback that the screen loaded and is fetching. Without this, the
+  // e-ink keeps showing the previous image (cached dashboard, or "SETTINGS SAVED")
+  // for the entire 10-15 s WiFi+fetch window, which reads as "frozen device."
+  // The final frame then partial-refreshes the real values over this base.
+  const bool drawPendingFrame = (manualWake && rtcHasBlockData) || homeButtonReset || postSaveRestartPending;
+  bool pendingFrameDrawn = false;
+  if (drawPendingFrame) {
+    const char* reason = postSaveRestartPending ? "post-save"
+                       : homeButtonReset ? "home-reset"
+                       : "button-wake";
+    Serial.printf("[BlockClock] pending frame: drawing loading placeholders (reason=%s)\n", reason);
+    BlockData pending = (manualWake && rtcHasBlockData) ? rtcBlockData : emptyBlockData();
+    pending.batteryVoltage = batteryVoltage;
+    pending.batteryPercent = batteryPercent;
+    safeCopyCString(pending.blockHeight, sizeof(pending.blockHeight), LOADING_TEXT);
+    safeCopyCString(pending.blocksToHalving, sizeof(pending.blocksToHalving), LOADING_TEXT);
+    safeCopyCString(pending.hashrateEhs, sizeof(pending.hashrateEhs), LOADING_TEXT);
+    safeCopyCString(pending.priceValue, sizeof(pending.priceValue), LOADING_TEXT);
+    pending.wifiOk = true;
+    pending.dataOk = false;
+    pending.updatedAt = 0;
+    clearScreenRenderWindow();
+    drawBlockDashboard(pending, deviceConfig);
+    pendingFrameDrawn = true;
+  } else {
+    Serial.printf("[BlockClock] pending frame skipped (manualWake=%d homeReset=%d hasCache=%d postSave=%d)\n",
+                  (int)manualWake, (int)homeButtonReset, (int)rtcHasBlockData, (int)postSaveRestartPending);
+  }
+
   BlockData data = rtcHasBlockData ? rtcBlockData : emptyBlockData();
+  data.batteryVoltage = batteryVoltage;
+  data.batteryPercent = batteryPercent;
+  data.wifiOk = true;
+  data.dataOk = false;
+  data.updatedAt = rtcLastKnownUnixTime;
+
   bool wifiOk = connectWiFi(deviceConfig, WIFI_CONNECT_TIMEOUT_MS, false);
+
   bool dataOk = false;
   if (wifiOk) {
     syncClockFromNtp();
@@ -159,13 +356,29 @@ void setup() {
   if (data.updatedAt < 1700000000 && rtcHasBlockData) {
     data.updatedAt = rtcBlockData.updatedAt;
   }
+  if (data.updatedAt >= 1700000000) {
+    rtcLastKnownUnixTime = data.updatedAt;
+  }
 
   if (hasUsefulBlockData(data)) {
     rtcBlockData = data;
     rtcHasBlockData = true;
   }
 
-  drawBlockDashboard(data, deviceConfig);
+  if (pendingFrameDrawn) {
+    // Partial refresh: full-screen window (avoids partial-window edge artifacts),
+    // fastmode on, draw (prepareScreen uses fillRect not clearMemory, keeping the
+    // pending frame as the base image), fastmode off.
+    setScreenRenderWindow(0, 0, DEVICE_DISPLAY_WIDTH, DEVICE_DISPLAY_HEIGHT);
+    display.fastmodeOn(false);
+    drawBlockDashboard(data, deviceConfig);
+    display.fastmodeOff();
+    clearScreenRenderWindow();
+  } else {
+    // Timer wake: e-ink retains previous image during deep sleep, so we let it
+    // sit during fetch and do one clean full refresh at the end.
+    drawBlockDashboard(data, deviceConfig);
+  }
   disconnectNetwork();
   goToSleep(deviceConfig.refreshIntervalMinutes);
 }

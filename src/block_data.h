@@ -38,8 +38,8 @@ static void mqttCallback(char* topic, byte* payload, unsigned int length) {
   } else if (strcmp(topic, deviceConfig.topicHashrate) == 0) {
     safeCopyCString(mqttTargetData->hashrateEhs, sizeof(mqttTargetData->hashrateEhs), value);
     gotHashrate = true;
-  } else if (strcmp(topic, deviceConfig.topicPriceUsd) == 0) {
-    safeCopyCString(mqttTargetData->priceUsd, sizeof(mqttTargetData->priceUsd), value);
+  } else if (strcmp(topic, deviceConfig.topicPriceValue) == 0) {
+    safeCopyCString(mqttTargetData->priceValue, sizeof(mqttTargetData->priceValue), value);
     gotPrice = true;
   }
 }
@@ -70,7 +70,7 @@ static bool connectMQTT(const DeviceConfig& cfg, uint16_t timeoutMs) {
   if (hasText(cfg.topicHeight)) mqttClient.subscribe(cfg.topicHeight);
   if (hasText(cfg.topicHalving)) mqttClient.subscribe(cfg.topicHalving);
   if (hasText(cfg.topicHashrate)) mqttClient.subscribe(cfg.topicHashrate);
-  if (hasText(cfg.topicPriceUsd)) mqttClient.subscribe(cfg.topicPriceUsd);
+  if (hasText(cfg.topicPriceValue)) mqttClient.subscribe(cfg.topicPriceValue);
   return true;
 }
 
@@ -140,29 +140,34 @@ static bool fetchOnlineHeight(BlockData& outData) {
   return true;
 }
 
-static bool fetchMempoolPrice(BlockData& outData) {
+static bool fetchMempoolPrice(const DeviceConfig& cfg, BlockData& outData) {
   String payload;
   if (!httpGetString(MEMPOOL_PRICE_URL, payload)) return false;
 
   StaticJsonDocument<384> doc;
   if (deserializeJson(doc, payload)) return false;
-  if (!doc["USD"].is<float>() && !doc["USD"].is<int>()) return false;
-  const long price = doc["USD"].as<long>();
+  const char* currency = currencyCodeLabel(cfg.currencyCode);
+  if (!doc[currency].is<float>() && !doc[currency].is<int>()) return false;
+  const long price = doc[currency].as<long>();
   if (price <= 0) return false;
-  snprintf(outData.priceUsd, sizeof(outData.priceUsd), "%ld", price);
+  snprintf(outData.priceValue, sizeof(outData.priceValue), "%ld", price);
   return true;
 }
 
-static bool fetchCoinGeckoPrice(BlockData& outData) {
+static bool fetchCoinGeckoPrice(const DeviceConfig& cfg, BlockData& outData) {
   String payload;
-  if (!httpGetString(COINGECKO_PRICE_URL, payload)) return false;
+  String url = COINGECKO_PRICE_URL_PREFIX;
+  url += currencyCodeParam(cfg.currencyCode);
+  url += COINGECKO_PRICE_URL_SUFFIX;
+  if (!httpGetString(url.c_str(), payload)) return false;
 
   StaticJsonDocument<256> doc;
   if (deserializeJson(doc, payload)) return false;
-  if (!doc["bitcoin"]["usd"].is<float>() && !doc["bitcoin"]["usd"].is<int>()) return false;
-  const long price = doc["bitcoin"]["usd"].as<long>();
+  const char* currency = currencyCodeParam(cfg.currencyCode);
+  if (!doc["bitcoin"][currency].is<float>() && !doc["bitcoin"][currency].is<int>()) return false;
+  const long price = doc["bitcoin"][currency].as<long>();
   if (price <= 0) return false;
-  snprintf(outData.priceUsd, sizeof(outData.priceUsd), "%ld", price);
+  snprintf(outData.priceValue, sizeof(outData.priceValue), "%ld", price);
   return true;
 }
 
@@ -181,12 +186,11 @@ static bool fetchOnlineHashrate(BlockData& outData) {
 }
 
 static bool fetchBlockDataOnline(const DeviceConfig& cfg, BlockData& outData) {
-  (void)cfg;
   bool ok = false;
   ok = fetchOnlineHeight(outData) || ok;
   ok = fetchOnlineHashrate(outData) || ok;
-  if (!fetchMempoolPrice(outData)) {
-    ok = fetchCoinGeckoPrice(outData) || ok;
+  if (!fetchMempoolPrice(cfg, outData)) {
+    ok = fetchCoinGeckoPrice(cfg, outData) || ok;
   } else {
     ok = true;
   }
