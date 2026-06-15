@@ -46,7 +46,7 @@ wall_bot   = 2.25;
 front_wall = 1.5;
 tol   = 0.25;
 R     = 3.5;
-rear  = 1.4;
+rear  = 2.4;
 
 inner_l = board_l + 2*tol;
 inner_w = board_w + 2*tol;
@@ -78,7 +78,7 @@ text_depth = 0.8;
 btn_x        = [13.0, 20.0, 27.0];
 btn_y        = case_w - 4.6;
 btn_post_d   = 3.5;
-btn_post_h   = 7.75;
+btn_post_h   = 8.75;
 btn_cap_d    = 0.0;
 btn_cap_h    = 1.0;
 btn_icon_r   = 1.8;
@@ -98,7 +98,7 @@ corner_d = 2.0;
 
 // ── Corner board supports ─────────────────────────────────
 supp_l = 4.5;
-supp_h = 10.5;
+supp_h = 11.5;
 
 // ── Snap plug ──────────────────────────────────────────────
 plug_tol  = 0.15;
