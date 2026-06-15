@@ -1,8 +1,14 @@
 # Block Clock
 
-Block Clock is a low-power open-source Bitcoin network display. It shows live Bitcoin network data on an e-ink screen, wakes on a configurable interval, and spends the rest of its time in deep sleep.
+A block clock is a small desk display that shows live Bitcoin network data — block height, blocks remaining to the next halving, BTC price, and network hashrate — on a low-power e-ink screen.
 
-Read the site page at [freedomclock.io/diy-block-clock/](https://freedomclock.io/diy-block-clock/).
+This is a DIY block clock that runs on the Heltec Vision Master E213 or E290 boards. It costs about $30 in parts, has no soldering for the basic build, and reads data either from your own Bitcoin node over MQTT or from mempool.space directly. The device wakes on a configurable interval, refreshes the display, and goes back to deep sleep — roughly one week of runtime on a small LiPo battery.
+
+| Front | Side |
+| --- | --- |
+| ![Front view of the DIY block clock showing block height, halving countdown, BTC price, and hashrate on an e-ink display](photos/blockclock-front.jpg) | ![Side view of the DIY block clock case showing the slim e-ink module on the Heltec Vision Master board](photos/blockclock-side.jpg) |
+
+Site page: [freedomclock.io/diy-block-clock/](https://freedomclock.io/diy-block-clock/).
 
 The current firmware supports both Heltec Vision Master E-series boards:
 
