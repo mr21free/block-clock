@@ -139,8 +139,6 @@ Main defaults are in [src/config.h](src/config.h).
 7. Press the RST button on the device once the upload starts if the board does not enter flash mode automatically.
 8. Join the device setup Wi-Fi and configure it in the browser.
 
-Important: each board needs firmware compiled for that exact board profile. Do not flash an E213 `.bin` onto an E290 or the other way around.
-
 ## Optional Secrets Bootstrap
 
 Normal setup happens through the browser page. If you want local defaults for development, copy `secrets.example.h` to `secrets.h` and edit it.
