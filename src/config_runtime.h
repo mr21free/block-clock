@@ -556,7 +556,7 @@ static String formatTimestamp(time_t when) {
   if (when < 1700000000) return "---";
   struct tm tmValue = {};
   if (!localtime_r(&when, &tmValue)) return "---";
-  char buffer[24];
-  strftime(buffer, sizeof(buffer), "%Y-%m-%d %H:%M", &tmValue);
+  char buffer[28];
+  strftime(buffer, sizeof(buffer), "%Y-%m-%d %H:%M UTC", &tmValue);
   return String(buffer);
 }
